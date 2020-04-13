@@ -1,0 +1,116 @@
+Parameters:
+
+  DomainName:
+    Type: String
+
+  CentralAccountId:
+    Type: String
+    Default: ""
+
+Conditions: 
+  UsePseudoAccountId: !Equals [!Ref CentralAccountId, ""]
+
+Mappings:
+  RegionMap:
+    eu-west-1:
+      WebsiteEndpoint: 's3-website-eu-west-1.amazonaws.com'
+      HostedZoneId: 'Z1BKCTXD74EZPE'
+    us-east-1:
+      WebsiteEndpoint: 's3-website-us-east-1.amazonaws.com'
+      HostedZoneId: 'Z3AQBSTGFYJSTF'
+
+Resources:
+
+  Route53HostedZone: 
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+
+  CreateRoute53RecordSet:
+    Type: Custom::NameServers
+    Properties:
+      ServiceToken:
+        !If
+        - UsePseudoAccountId
+        - !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:CreateRoute53RecordSet"
+        - !Sub "arn:aws:sns:${AWS::Region}:${CentralAccountId}:CreateRoute53RecordSet"
+      DomainName: !Ref DomainName
+      NameServers: !GetAtt Route53HostedZone.NameServers
+
+  LambdaFunctionPythonBoto3RequestsLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+        - python3.8
+      Content:
+        S3Bucket: !Sub "htcr-${AWS::Region}"
+        S3Key: "route53nscr/layer.zip"
+
+  LambdaFunctionCreateS3File:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      Timeout: 11
+      Role: !GetAtt IAMRoleForLambdaFunctionCreateS3File.Arn
+      Layers:
+        - !Ref LambdaFunctionPythonBoto3RequestsLayer
+      Code:
+        S3Bucket: !Sub "htcr-${AWS::Region}"
+        S3Key: "route53nscr/lambda-custom-resource-s3-file.zip"
+
+  IAMRoleForLambdaFunctionCreateS3File:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: "S3"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: "s3:*"
+                Resource: "*"
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref DomainName
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+
+  S3IndexFile:
+    Type: Custom::IndexFile
+    Properties:
+      ServiceToken: !GetAtt LambdaFunctionCreateS3File.Arn
+      Bucket: !Ref S3Bucket
+      Key: "index.html"
+      Content: |
+        <html>
+          <head>
+            <title>Hello World</title>
+          </head>
+          <body>
+            <h1>Hello World</h1>
+          </body>
+        </html>
+
+  Route53RecordSet: 
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref Route53HostedZone
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !FindInMap [RegionMap, !Ref 'AWS::Region', WebsiteEndpoint]
+        HostedZoneId: !FindInMap [RegionMap, !Ref 'AWS::Region', HostedZoneId]

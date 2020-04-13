@@ -1,0 +1,95 @@
+Parameters:
+
+  HostedZoneId: 
+    Type: String
+
+  AuthorizedAccounts:
+    Type: CommaDelimitedList
+    Default: ""
+
+Conditions:
+  UsePseudoAccountId: !Equals [!Select [0, !Ref AuthorizedAccounts], ""]
+
+Resources:
+
+  LambdaFunctionPythonBoto3RequestsLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+        - python3.8
+      Content:
+        S3Bucket: !Sub 'htcr-${AWS::Region}'
+        S3Key: "route53nscr/layer.zip"
+
+  LambdaFunctionCreateRoute53RecordSet:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      Timeout: 10
+      Layers:
+        - !Ref LambdaFunctionPythonBoto3RequestsLayer
+      Environment:
+        Variables:
+          HOSTED_ZONE_ID: !Ref HostedZoneId
+      Role: !GetAtt IAMRoleForLambdaFunctionCreateRoute53RecordSet.Arn
+      Code:
+       S3Bucket: !Sub 'htcr-${AWS::Region}'
+       S3Key: 'route53nscr/lambda-custom-resource-ns-recordset.zip'
+
+  IAMRoleForLambdaFunctionCreateRoute53RecordSet:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: "Route53"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "route53:GetHostedZone"
+                  - "route53:ChangeResourceRecordSets"
+                Resource: !Sub "arn:aws:route53:::hostedzone/${HostedZoneId}"
+
+  SNSTopicCreateRoute53RecordSet: 
+    Type: AWS::SNS::Topic
+    Properties: 
+      Subscription: 
+        - Endpoint: !GetAtt LambdaFunctionCreateRoute53RecordSet.Arn
+          Protocol: lambda
+      TopicName: CreateRoute53RecordSet
+
+  SNSTopicPolicyCreateRoute53RecordSet:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SNSTopicCreateRoute53RecordSet
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal: 
+            AWS:
+              !If
+              - UsePseudoAccountId
+              - !Sub "${AWS::AccountId}"
+              - !Ref AuthorizedAccounts
+          Action: 'sns:Publish'
+          Resource: !Ref SNSTopicCreateRoute53RecordSet
+
+  LambdaPermissionCreateRoute53RecordSet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref LambdaFunctionCreateRoute53RecordSet
+      Principal: 'sns.amazonaws.com'
+      SourceArn: !Ref SNSTopicCreateRoute53RecordSet
